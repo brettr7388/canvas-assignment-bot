@@ -1,5 +1,7 @@
 // Content script that runs in the context of Canvas quiz pages
 
+declare var Tesseract: any; // Declare Tesseract global
+
 type QuestionType = 'multiple_choice' | 'matching' | 'dropdown';
 interface Question {
   type: QuestionType;
@@ -376,6 +378,41 @@ class QuizHelper {
 
     panel.appendChild(manualQuestionSection);
 
+    // Add Screenshot Drop Area
+    const screenshotDropArea = document.createElement('div');
+    screenshotDropArea.textContent = 'Drag and drop screenshot here';
+    screenshotDropArea.style.cssText = `
+      margin-top: 20px;
+      padding: 20px;
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      text-align: center;
+      color: #555;
+      cursor: pointer;
+      background-color: #f9f9f9;
+      transition: background-color 0.3s ease;
+    `;
+
+    // Prevent default drag behaviors
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+      screenshotDropArea.addEventListener(eventName, this.preventDefaults, false);
+      document.body.addEventListener(eventName, this.preventDefaults, false); // Also prevent on body
+    });
+
+    // Highlight drop area when dragging over
+    ['dragenter', 'dragover'].forEach(eventName => {
+      screenshotDropArea.addEventListener(eventName, () => screenshotDropArea.style.backgroundColor = '#eee', false);
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      screenshotDropArea.addEventListener(eventName, () => screenshotDropArea.style.backgroundColor = '#f9f9f9', false);
+    });
+
+    // Handle dropped files
+    screenshotDropArea.addEventListener('drop', (e) => this.handleScreenshotDrop(e), false);
+
+    panel.appendChild(screenshotDropArea);
+
     document.body.appendChild(panel);
 
     // Add dragging functionality
@@ -407,6 +444,101 @@ class QuizHelper {
         this.panelElement.style.cursor = 'move';
       }
     });
+  }
+
+  // Helper function to prevent default events
+  private preventDefaults(e: Event): void {
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  // Handle dropped screenshot file
+  private async handleScreenshotDrop(e: DragEvent): Promise<void> {
+    if (!e.dataTransfer) return;
+    const files = e.dataTransfer.files;
+
+    const dropMessageArea = this.panelElement?.querySelector('.drop-message-area') as HTMLElement || document.createElement('div');
+     if (!dropMessageArea.classList.contains('drop-message-area')) { // Create if it doesn't exist
+        dropMessageArea.classList.add('drop-message-area');
+        dropMessageArea.style.cssText = `margin-top: 10px; font-style: italic; color: gray;`;
+        this.panelElement?.appendChild(dropMessageArea);
+     }
+
+    // Clear previous messages
+    dropMessageArea.textContent = '';
+    dropMessageArea.style.color = 'gray'; // Default color for processing messages
+
+    if (files.length > 0) {
+      const file = files[0];
+      console.log('Screenshot dropped:', file.name, file.type, file.size);
+
+      if (!file.type.startsWith('image/')) {
+        dropMessageArea.textContent = 'Invalid file type. Please drop an image.';
+        dropMessageArea.style.color = 'orange';
+        return;
+      }
+
+      dropMessageArea.textContent = `Processing screenshot: ${file.name}...`;
+
+      try {
+        // Assuming Tesseract.js is available globally as 'Tesseract'
+        // You will need to ensure Tesseract.js is properly included in your extension
+        const { data: { text } } = await (Tesseract as any).recognize(
+          file,
+          'eng', // Language code (English)
+          { 
+            // logger: m => console.log(m) // Uncomment for progress logs
+          }
+        );
+
+        console.log('OCR Text:', text);
+
+        if (text && text.trim()) {
+          dropMessageArea.textContent = 'Text extracted. Getting answer...';
+
+          // Send the extracted text to the backend
+          const response = await fetch('http://localhost:3001/getAnswer', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ stem: text.trim(), options: [] }), // Send extracted text as stem
+          });
+
+          if (!response.ok) {
+            console.error('Error fetching answer for screenshot:', response.status, response.statusText);
+            dropMessageArea.textContent = `Error getting answer (${response.status})`;
+            dropMessageArea.style.color = 'red';
+            return;
+          }
+
+          const data = await response.json();
+          const answer = data.answer;
+
+          if (answer) {
+            dropMessageArea.textContent = `Answer: ${answer}`; // Display the answer
+            dropMessageArea.style.color = 'green';
+          } else {
+            console.warn('Backend returned no answer for screenshot text');
+            dropMessageArea.textContent = 'No answer found for extracted text.';
+            dropMessageArea.style.color = 'orange';
+          }
+
+        } else {
+          dropMessageArea.textContent = 'Could not read text from screenshot.';
+          dropMessageArea.style.color = 'orange';
+        }
+
+      } catch (error) {
+        console.error('Error during OCR or fetching answer:', error);
+        dropMessageArea.textContent = 'Error processing screenshot.';
+        dropMessageArea.style.color = 'red';
+      }
+
+    } else {
+      dropMessageArea.textContent = 'No file dropped or invalid file.';
+      dropMessageArea.style.color = 'orange';
+    }
   }
 
   private async handleManualQuestion(questionText: string): Promise<void> {
